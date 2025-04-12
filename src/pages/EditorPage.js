@@ -1,9 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import toast from 'react-hot-toast';
-import ACTIONS from '../Actions';
-import Client from '../components/Client';
-import Editor from '../components/Editor';
-import { initSocket } from '../socket';
+import ACTIONS from '../Actions'; // Constants for socket event names
+import Client from '../components/Client'; // Component to display connected users
+import Editor from '../components/Editor'; // Code editor component
+import { initSocket } from '../socket'; // Socket initialization utility
 import {
     useLocation,
     useNavigate,
@@ -11,98 +11,126 @@ import {
     useParams,
 } from 'react-router-dom';
 
+// EditorPage component: Manages the real-time code editor and collaboration room
 const EditorPage = () => {
-    const socketRef = useRef(null);
-    const codeRef = useRef(null);
-    const location = useLocation();
-    const { roomId } = useParams();
-    const reactNavigator = useNavigate();
-    const [clients, setClients] = useState([]);
+    // State and refs for socket, code, clients, and UI loading
+    const socketRef = useRef(null); // Stores socket instance
+    const codeRef = useRef(null); // Stores latest code for syncing
+    const location = useLocation(); // Access location state (e.g., username)
+    const { roomId } = useParams(); // Get room ID from URL
+    const navigate = useNavigate(); // Programmatic navigation
+    const [clients, setClients] = useState([]); // List of connected clients
+    const [isLoading, setIsLoading] = useState(true); // Tracks connection status
+    const [theme, setTheme] = useState('dark'); // Editor theme (dark/light)
 
+    // Handle socket errors with consistent feedback
+    const handleErrors = useCallback((err) => {
+        console.error('Socket error:', err);
+        toast.error('Socket connection failed. Please try again.');
+        navigate('/');
+    }, [navigate]);
+
+    // Initialize socket connection and set up event listeners
     useEffect(() => {
         const init = async () => {
-            socketRef.current = await initSocket();
-            socketRef.current.on('connect_error', (err) => handleErrors(err));
-            socketRef.current.on('connect_failed', (err) => handleErrors(err));
+            try {
+                // Initialize socket
+                socketRef.current = await initSocket();
+                setIsLoading(false); // Connection established
 
-            function handleErrors(e) {
-                console.log('socket error', e);
-                toast.error('Socket connection failed, try again later.');
-                reactNavigator('/');
-            }
+                // Handle connection errors
+                socketRef.current.on('connect_error', handleErrors);
+                socketRef.current.on('connect_failed', handleErrors);
 
-            socketRef.current.emit(ACTIONS.JOIN, {
-                roomId,
-                username: location.state?.username,
-            });
+                // Join the room with roomId and username
+                socketRef.current.emit(ACTIONS.JOIN, {
+                    roomId,
+                    username: location.state?.username,
+                });
 
-            // Listening for joined event
-            socketRef.current.on(
-                ACTIONS.JOINED,
-                ({ clients, username, socketId }) => {
+                // Handle new user joining
+                socketRef.current.on(ACTIONS.JOINED, ({ clients, username, socketId }) => {
                     if (username !== location.state?.username) {
-                        toast.success(`${username} joined the room.`);
+                        toast.success(`${username} joined the room!`);
                         console.log(`${username} joined`);
                     }
-                    setClients(clients);
-                    socketRef.current.emit(ACTIONS.SYNC_CODE, {
-                        code: codeRef.current,
-                        socketId,
-                    });
-                }
-            );
+                    setClients(clients); // Update connected clients list
+                    // Sync code with the new user
+                    if (codeRef.current) {
+                        socketRef.current.emit(ACTIONS.SYNC_CODE, {
+                            code: codeRef.current,
+                            socketId,
+                        });
+                    }
+                });
 
-            // Listening for disconnected
-            socketRef.current.on(
-                ACTIONS.DISCONNECTED,
-                ({ socketId, username }) => {
+                // Handle user disconnection
+                socketRef.current.on(ACTIONS.DISCONNECTED, ({ socketId, username }) => {
                     toast.success(`${username} left the room.`);
-                    setClients((prev) => {
-                        return prev.filter(
-                            (client) => client.socketId !== socketId
-                        );
-                    });
-                }
-            );
+                    setClients((prev) => prev.filter((client) => client.socketId !== socketId));
+                });
+            } catch (err) {
+                handleErrors(err); // Handle initialization errors
+            }
         };
-        init();
-        return () => {
-            socketRef.current.disconnect();
-            socketRef.current.off(ACTIONS.JOINED);
-            socketRef.current.off(ACTIONS.DISCONNECTED);
-        };
-    }, []);
 
-    async function copyRoomId() {
+        init();
+
+        // Cleanup socket listeners and disconnect on unmount
+        return () => {
+            if (socketRef.current) {
+                socketRef.current.disconnect();
+                socketRef.current.off(ACTIONS.JOINED);
+                socketRef.current.off(ACTIONS.DISCONNECTED);
+                socketRef.current.off('connect_error');
+                socketRef.current.off('connect_failed');
+            }
+        };
+    }, [handleErrors, location.state?.username, roomId]);
+
+    // Copy room ID to clipboard with improved error handling
+    const copyRoomId = useCallback(async () => {
         try {
             await navigator.clipboard.writeText(roomId);
-            toast.success('Room ID has been copied to your clipboard');
+            toast.success('Room ID copied to clipboard!');
         } catch (err) {
-            toast.error('Could not copy the Room ID');
-            console.error(err);
+            console.error('Failed to copy room ID:', err);
+            toast.error('Failed to copy Room ID.');
         }
-    }
+    }, [roomId]);
 
-    function leaveRoom() {
-        reactNavigator('/');
-    }
+    // Navigate back to home page when leaving the room
+    const leaveRoom = useCallback(() => {
+        socketRef.current?.emit(ACTIONS.DISCONNECTED, {
+            roomId,
+            username: location.state?.username,
+        });
+        navigate('/');
+    }, [navigate, roomId, location.state?.username]);
 
-    if (!location.state) {
+    // Toggle editor theme between dark and light
+    const toggleTheme = useCallback(() => {
+        setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+    }, []);
+
+    // Redirect to home if username is missing
+    if (!location.state?.username) {
         return <Navigate to="/" />;
     }
 
     return (
         <div className="mainWrap">
+            {/* Sidebar for connected clients and controls */}
             <div className="aside">
                 <div className="asideInner">
                     <div className="logo">
                         <img
                             className="logoImage"
                             src="/code-sync.png"
-                            alt="logo"
+                            alt="CodeSync Logo"
                         />
                     </div>
-                    <h3>Connected</h3>
+                    <h3>{isLoading ? 'Connecting...' : 'Connected'}</h3>
                     <div className="clientsList">
                         {clients.map((client) => (
                             <Client
@@ -112,21 +140,34 @@ const EditorPage = () => {
                         ))}
                     </div>
                 </div>
+                {/* Theme toggle button */}
+                <button
+                    className="btn themeBtn"
+                    onClick={toggleTheme}
+                >
+                    {theme === 'dark' ? 'Switch to Light' : 'Switch to Dark'}
+                </button>
                 <button className="btn copyBtn" onClick={copyRoomId}>
                     Copy ROOM ID
                 </button>
                 <button className="btn leaveBtn" onClick={leaveRoom}>
-                    Leave
+                    Leave Room
                 </button>
             </div>
+            {/* Editor section */}
             <div className="editorWrap">
-                <Editor
-                    socketRef={socketRef}
-                    roomId={roomId}
-                    onCodeChange={(code) => {
-                        codeRef.current = code;
-                    }}
-                />
+                {isLoading ? (
+                    <div className="loading">Loading editor...</div>
+                ) : (
+                    <Editor
+                        socketRef={socketRef}
+                        roomId={roomId}
+                        theme={theme} // Pass theme to Editor
+                        onCodeChange={(code) => {
+                            codeRef.current = code; // Update code ref
+                        }}
+                    />
+                )}
             </div>
         </div>
     );
